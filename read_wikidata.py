@@ -91,7 +91,7 @@ class WikiDataThing(object):
             cypher = (
                 u"""MERGE (source:Entity {{name: "{source_id}"}}) WITH source """
                 """MERGE (target:Entity {{name: "{target_id}"}}) WITH source, target """
-                """MERGE (source)-[property:RELATED_TO|{property_id}]->(target) """
+                """MERGE (source)-[property:{property_id}]->(target) """
                 """SET property.name = "{property_id}";""").format(
                     source_id=source_id, property_id=property_id, target_id=target_id) 
             self.cypher_statements.append(cypher)
