@@ -1,10 +1,14 @@
+import progressbar
+import time
+import re
+import sys
 import gzip
 import bz2
 import collections
 import sys
 import json
 import argparse
-
+import py2neo
 
 def file_handler(filename):
     if filename is None:
@@ -40,6 +44,7 @@ class WikiDataThing(object):
         self.wikidata_id = json_dict['id']
         self.non_relational_properties = collections.defaultdict(list)
         self.labels = json_dict['labels']
+        self.english_label = self.labels.get('en', {}).get('value', 'None')
         self.triples = []
         self.descriptions = {
             language: description for language, description in
@@ -66,22 +71,21 @@ class WikiDataThing(object):
 
     def to_cypher_property(self):
         cypher = (
-            u"""MERGE (property:Property {{name: "{property_id}"}}) """)
+            u"""MERGE (property:Property {{name: "{property_id}"}}); """)
         non_relational_properties = {
             property_name: value for property_name, value in
             self.non_relational_properties.iteritems()}
         delisted_dictionary = delist_dictionary(non_relational_properties)
         for non_relational_property, property_value in delisted_dictionary.iteritems():
-            if isinstance(property_value, list):
-                property_value = json.dumps(property_value)
             cypher = (
                 u"""MERGE (source_property:Property """
                 """{{name: "{source_property_id}"}}) """
                 """SET source_property.{non_relational_property} = """
-                """ "{non_relational_property_value}"'""").format(
+                """ "{non_relational_property_value}"; """).format(
                     source_property_id=self.wikidata_id,
                     non_relational_property=non_relational_property,
-                    non_relational_property_value=json.dumps(property_value))
+                    non_relational_property_value=py2neo.cypher_escape(
+                        property_value).replace('\\', '\\\\').replace(u'"', u'\\"'))
             self.cypher_statements.append(cypher)
 
     def to_cypher_item(self):
@@ -91,7 +95,7 @@ class WikiDataThing(object):
             cypher = (
                 u"""MERGE (source:Entity {{name: "{source_id}"}}) WITH source """
                 """MERGE (target:Entity {{name: "{target_id}"}}) WITH source, target """
-                """MERGE (source)-[property:{property_id}]->(target) """
+                """CREATE (source)-[property:{property_id}]->(target) """
                 """SET property.name = "{property_id}";""").format(
                     source_id=source_id, property_id=property_id, target_id=target_id) 
             self.cypher_statements.append(cypher)
@@ -101,15 +105,19 @@ class WikiDataThing(object):
             self.non_relational_properties.iteritems()}
         delisted_dictionary = delist_dictionary(non_relational_properties)
         for non_relational_property, property_value in delisted_dictionary.iteritems():
-            if isinstance(property_value, list):
-                property_value = json.dumps(property_value)
             cypher = (
                 u"""MERGE (source:Entity {{name: "{source_id}"}}) """
-                """SET source.{non_relational_property} = "{property_value}"'""").format(
+                """SET source.{non_relational_property} = "{property_value}"; """).format(
                     source_id=self.wikidata_id,
                     non_relational_property=non_relational_property,
-                    property_value=property_value)
+                    property_value=py2neo.cypher_escape(property_value).replace(u'\\', u'\\\\').replace('"', '\\"'))
             self.cypher_statements.append(cypher)
+        cypher = (
+            u"""MERGE (source:Entity {{name: "{source_id}"}}) """
+            """SET source.english_label = "{property_value}"; """).format(
+                source_id=self.wikidata_id,
+                property_value=py2neo.cypher_escape(self.english_label).replace(u'\\', u'\\\\').replace('"', '\\"'))
+        self.cypher_statements.append(cypher)
             
 
 class WikiDataClaim(object):
@@ -168,27 +176,39 @@ if __name__ == '__main__':
         '--input-file',
         required=True,
         help='File containing JSON dump. Defaults to stdin.')
-    parser.add_argument(
-        '--output-file',
-        required=True,
-        help='Output file for Cypher statements')
 
     args = parser.parse_args()
   
     input_file_handler = file_handler(args.input_file)
-    output_file_handler = file_handler(args.output_file)
+    
+    #graph = py2neo.database.Graph(
+    #    host='localhost',
+    #    password='imadfs618',
+    #    username='neo4j')
+   
+    #transaction = graph.begin()
 
-    line_counter = 0
-    with output_file_handler(args.output_file, 'w') as cypher_file:
-        with input_file_handler(args.input_file, 'r') as wikidata_file:
-            for line in wikidata_file:
-                if line[0] == '[' or line[0] == ']':
-                    continue
-                line = line.strip()[:-1]
-                line_counter += 1
+    pb = progressbar.ProgressBar(max_value=25163532)
+
+    with input_file_handler(args.input_file, 'r') as wikidata_file:
+        line_counter = 0
+        for line in wikidata_file:
+            if line[0] == '[' or line[0] == ']':
+                continue
+            line_counter += 1 
+            pb.update(line_counter)
+            if line_counter < -137591:
+                continue
+            line = line.strip()[:-1]
+            line = line.encode('utf8')
+            try:
                 line_dict = json.loads(line)
-                thing = WikiDataThing(
-                    line_dict)
-                thing.to_cypher()
-                for statement in thing.cypher_statements:
-                    cypher_file.write((statement + u'\n').encode('utf8'))
+            except Exception as err:
+                sys.stderr.write('Blargh! ' + str(line_counter) + '\n')
+                continue
+            thing = WikiDataThing(
+                line_dict)
+            thing.to_cypher()
+            for statement in thing.cypher_statements:
+                print statement
+                statement = statement.encode('utf8', 'ignore')
